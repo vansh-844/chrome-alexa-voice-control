@@ -7,13 +7,13 @@ const NavigateSchema = z.object({
 
 const ClickSchema = z.object({
   tool: z.literal("click"),
-  selector: z.string(),
+  ref: z.string(),
 });
 
-const TypeSchema = z.object({
-  tool: z.literal("type"),
+const FillSchema = z.object({
+  tool: z.literal("fill"),
+  ref: z.string(),
   text: z.string(),
-  selector: z.string().optional(),
 });
 
 const PressKeySchema = z.object({
@@ -21,22 +21,17 @@ const PressKeySchema = z.object({
   key: z.string(),
 });
 
-const WaitForLoadSchema = z.object({
-  tool: z.literal("wait_for_load"),
-});
-
-const WaitForSelectorSchema = z.object({
-  tool: z.literal("wait_for_selector"),
-  selector: z.string(),
+const WaitSchema = z.object({
+  tool: z.literal("wait"),
+  ms: z.number().int().min(0).max(10000),
 });
 
 export const TaskSchema = z.discriminatedUnion("tool", [
   NavigateSchema,
   ClickSchema,
-  TypeSchema,
+  FillSchema,
   PressKeySchema,
-  WaitForLoadSchema,
-  WaitForSelectorSchema,
+  WaitSchema,
 ]);
 
 export const LLMResponseSchema = z.object({

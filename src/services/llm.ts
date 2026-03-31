@@ -1,84 +1,71 @@
 import OpenAI from 'openai';
 import { config } from '../config/env.js';
-import { getSelectors } from '../config/selectors.js';
 import { LLMResponseSchema } from '../tools/schemas.js';
 import { LLMResponse } from '../types/index.js';
-import { DOMElement } from '../services/browser.js';
+import { SnapshotResult } from '../services/browser.js';
 
 const client = new OpenAI({ apiKey: config.openaiApiKey });
 
-const MAX_TURNS = 7;
+const MAX_TURNS = 5;
 
-const SYSTEM_PROMPT = `You are a browser automation assistant. Convert voice commands into complete browser tool call sequences.
+const SYSTEM_PROMPT = `You are a browser automation assistant. You control a real browser via voice commands.
 
-## Available Tools
-- navigate(url)               Navigate to a URL
-- click(selector)             Click an element by CSS selector
-- type(text, selector?)       Type text into focused or specified element
-- press_key(key)              Press a key (e.g. "Enter", "Tab")
-- wait_for_load()             Wait for page navigation to settle
-- wait_for_selector(selector) Wait for an element to appear
+Each turn you receive the current page's accessibility tree. Elements have refs (@e1, @e2, …).
+Refs are valid only for the current snapshot — they change after any navigation.
 
-## Rules
-- Return the COMPLETE task list for the entire command in one response
-- Use your knowledge of popular websites to predict CSS selectors (prefer aria-label and data-testid over class names)
-- Always include wait_for_selector before clicking dynamically loaded elements
-- If the task is already complete, return: { "done": true }
-- Response must be JSON only — no prose
+Available Tools (each task must have a "tool" field with one of these exact values):
 
-## Output Format
-{ "tasks": [ { "tool": "...", ...params } ] }   — or —   { "done": true }`;
+{ "tool": "navigate",  "url": "https://example.com" }
+{ "tool": "click",     "ref": "e5" }
+{ "tool": "fill",      "ref": "e5", "text": "hello" }
+{ "tool": "press_key", "key": "Enter" }
+{ "tool": "wait",      "ms": 1000 }
+
+Rules:
+- Every task object MUST have a "tool" field — never use the tool name as a key
+- Only use refs from the snapshot provided to you — never invent refs
+- Return only actions up to the next navigation or major DOM change
+- After a navigate, you will receive a new snapshot automatically
+- If done: return { "done": true }
+- JSON only, no prose.
+
+Output format:
+{ "tasks": [ { "tool": "click", "ref": "e5" }, { "tool": "press_key", "key": "Enter" } ] }
+or
+{ "done": true }`;
 
 type Message = OpenAI.Chat.ChatCompletionMessageParam;
 
 export type LLMCallResult = { done: true } | { done: false; response: LLMResponse };
 
-export function buildInitialMessages(command: string, currentUrl: string): Message[] {
+export function buildInitialMessages(command: string, snapshot: SnapshotResult): Message[] {
   return [
     { role: 'system', content: SYSTEM_PROMPT },
     {
       role: 'user',
-      content: `${command}\n\nCurrent URL: ${currentUrl}`,
+      content: `${command}\n\nCurrent URL: ${snapshot.data.origin}\n\nAccessibility tree:\n${snapshot.data.snapshot}`,
     },
   ];
 }
 
-export function appendSelectorFallbackMessage(
+export function appendSnapshotMessage(
   messages: Message[],
   assistantReply: string,
-  failedSelector: string,
-  failedTool: string,
-  currentUrl: string,
-  domSnapshot: DOMElement[],
-  learnedSelectors: Record<string, string>,
-  screenshotBase64: string,
+  snapshot: SnapshotResult,
+  failure?: { failedRef: string | null; failedTool: string },
 ): void {
-  const staticSelectors = getSelectors(currentUrl);
-  const allSelectors = { ...staticSelectors, ...learnedSelectors };
-
   messages.push({ role: 'assistant', content: assistantReply });
-  messages.push({
-    role: 'user',
-    content: [
-      {
-        type: 'image_url',
-        image_url: { url: `data:image/jpeg;base64,${screenshotBase64}`, detail: 'low' },
-      },
-      {
-        type: 'text',
-        text: `Selector "${failedSelector}" used in "${failedTool}" was not found on the page.
 
-Interactive elements currently visible:
-${JSON.stringify(domSnapshot, null, 2)}
+  let text = '';
+  if (failure) {
+    const refDesc = failure.failedRef
+      ? `Ref ${failure.failedRef} in ${failure.failedTool}`
+      : `Tool ${failure.failedTool}`;
+    text += `${refDesc} was not found. Here is the updated accessibility tree — retry using refs from this snapshot.\n\n`;
+  }
+  text += `Current URL: ${snapshot.data.origin}\n\nAccessibility tree:\n${snapshot.data.snapshot}`;
 
-Known selectors for this page (use if relevant):
-${JSON.stringify(allSelectors, null, 2)}
-
-The screenshot above shows the current state of the browser. An unexpected popup or overlay may be blocking the page.
-Please retry the full task list with corrected selectors.`,
-      },
-    ],
-  });
+  messages.push({ role: 'user', content: text });
 }
 
 export async function callLLM(messages: Message[]): Promise<LLMCallResult> {
@@ -95,8 +82,13 @@ export async function callLLM(messages: Message[]): Promise<LLMCallResult> {
     return { done: true };
   }
 
-  const result = LLMResponseSchema.parse(parsed) as LLMResponse;
-  return { done: false, response: result };
+  const parseResult = LLMResponseSchema.safeParse(parsed);
+  if (!parseResult.success) {
+    throw new Error(
+      `LLM returned invalid task structure: ${parseResult.error.issues.map((i) => i.message).join(', ')}`,
+    );
+  }
+  return { done: false, response: parseResult.data };
 }
 
 export { MAX_TURNS };
